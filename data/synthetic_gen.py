@@ -75,10 +75,15 @@ def _load_hard_case_guide() -> str:
     guide_path = _find_existing_path(HARD_CASE_GUIDE_CANDIDATES)
     if not guide_path:
         return ""
+
     return guide_path.read_text(encoding="utf-8")
 
 
-def _normalize_case(case: Dict, fallback_doc_id: str, default_type: str = "fact-check") -> Dict:
+def _normalize_case(
+    case: Dict,
+    fallback_doc_id: str,
+    default_type: str = "fact-check",
+) -> Dict:
     question = str(case.get("question", "")).strip()
     expected_answer = str(case.get("expected_answer", "")).strip()
     context = str(case.get("context", "")).strip()
@@ -121,10 +126,13 @@ async def generate_qa_from_text(
     """
     if client is None:
         if AsyncOpenAI is None:
-            raise ImportError("Thiếu package 'openai'. Chạy: pip install -r requirements.txt")
+            raise ImportError(
+                "Thiếu package 'openai'. Chạy: pip install -r requirements.txt"
+            )
         api_key = os.getenv("OPENAI_API_KEY")
         if not api_key:
             raise EnvironmentError("Thiếu OPENAI_API_KEY trong environment hoặc .env")
+
         client = AsyncOpenAI(api_key=api_key)
 
     model_name = model or os.getenv("OPENAI_MODEL", "gpt-4o-mini")
@@ -179,7 +187,10 @@ Tài liệu:
 {text}
 """.strip()
 
-    _log(f"[{doc_id}] bắt đầu sinh {num_pairs} QA (mode={mode}) bằng model {model_name}")
+    _log(
+        f"[{doc_id}] bắt đầu sinh {num_pairs} QA (mode={mode}) bằng model "
+        f"{model_name}"
+    )
     for attempt in range(3):
         _log(f"[{doc_id}] gọi model, lần thử {attempt + 1}/3")
         response = await client.chat.completions.create(
@@ -194,10 +205,13 @@ Tài liệu:
         try:
             parsed = _extract_json_array(content)
             normalized = [
-                _normalize_case(case, fallback_doc_id=doc_id) for case in parsed if isinstance(case, dict)
+                _normalize_case(case, fallback_doc_id=doc_id)
+                for case in parsed
+                if isinstance(case, dict)
             ]
             normalized = [
-                c for c in normalized
+                c
+                for c in normalized
                 if c["question"] and c["expected_answer"] and c["context"]
             ]
             min_required = min(num_pairs, 3)
@@ -234,9 +248,14 @@ async def generate_hard_cases_from_guide(
     allocations = _allocate_counts(total_cases, doc_ids)
     semaphore = asyncio.Semaphore(max(1, concurrency))
 
-    async def _generate_hard_for_doc(doc_id: str, text: str, target: int) -> tuple[str, List[Dict], float]:
+    async def _generate_hard_for_doc(
+        doc_id: str,
+        text: str,
+        target: int,
+    ) -> tuple[str, List[Dict], float]:
         if target <= 0:
             return doc_id, [], 0.0
+
         start = time.perf_counter()
         async with semaphore:
             cases = await generate_qa_from_text(
@@ -280,13 +299,19 @@ async def generate_top_up_cases_with_llm(
 ) -> List[Dict]:
     if needed <= 0:
         return []
+
     doc_ids = list(docs.keys())
     allocations = _allocate_counts(needed, doc_ids)
     semaphore = asyncio.Semaphore(max(1, concurrency))
 
-    async def _top_up_for_doc(doc_id: str, text: str, target: int) -> tuple[str, List[Dict], float]:
+    async def _top_up_for_doc(
+        doc_id: str,
+        text: str,
+        target: int,
+    ) -> tuple[str, List[Dict], float]:
         if target <= 0:
             return doc_id, [], 0.0
+
         start = time.perf_counter()
         async with semaphore:
             cases = await generate_qa_from_text(
@@ -326,8 +351,10 @@ def _deduplicate_cases(cases: List[Dict]) -> List[Dict]:
         key = " ".join(case.get("question", "").lower().split())
         if not key or key in seen:
             continue
+
         seen.add(key)
         deduped.append(case)
+
     return deduped
 
 
@@ -335,6 +362,7 @@ async def main() -> None:
     load_dotenv()
     if AsyncOpenAI is None:
         raise ImportError("Thiếu package 'openai'. Chạy: pip install -r requirements.txt")
+
     api_key = os.getenv("OPENAI_API_KEY")
     if not api_key:
         raise EnvironmentError("Thiếu OPENAI_API_KEY. Hãy thêm vào environment hoặc file .env")
@@ -357,7 +385,10 @@ async def main() -> None:
     client = AsyncOpenAI(api_key=api_key)
     semaphore = asyncio.Semaphore(max(1, concurrency))
 
-    async def _generate_for_doc(doc_id: str, text: str) -> tuple[str, List[Dict], float]:
+    async def _generate_for_doc(
+        doc_id: str,
+        text: str,
+    ) -> tuple[str, List[Dict], float]:
         start = time.perf_counter()
         async with semaphore:
             qa_pairs = await generate_qa_from_text(
@@ -411,7 +442,9 @@ async def main() -> None:
             break
         needed = target_total - len(all_cases)
         current_hard = sum(
-            1 for c in all_cases if "hard" in str(c.get("metadata", {}).get("difficulty", "")).lower()
+            1
+            for c in all_cases
+            if "hard" in str(c.get("metadata", {}).get("difficulty", "")).lower()
         )
         prefer_hard = current_hard < hard_target
         _log(
