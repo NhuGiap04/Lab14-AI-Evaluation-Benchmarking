@@ -2,9 +2,9 @@ import asyncio
 import json
 import os
 import re
-from typing import Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
-from openai import AsyncOpenAI
+from openai import AsyncOpenAI, NotFoundError
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -32,11 +32,73 @@ class MainAgent:
         self.top_k = top_k
         self.dataset_path = dataset_path
         self.model = os.getenv("AGENT_MODEL", "openai/gpt-oss-20b")
-        self.client = AsyncOpenAI(
-            api_key=os.getenv("NVIDIA_API_KEY"),
-            base_url=os.getenv("NVIDIA_BASE_URL", "https://integrate.api.nvidia.com/v1/"),
-        )
+        self.provider_name, self.client, self.client_base_url = self._build_primary_client(self.model)
+        self.fallback_provider_name, self.fallback_client, self.fallback_base_url = self._build_fallback_client(self.model)
         self.knowledge_base = self._load_knowledge_base()
+
+    @staticmethod
+    def _looks_like_openai_model(model: str) -> bool:
+        m = (model or "").strip().lower()
+        if not m:
+            return False
+        if m.startswith("openai/"):
+            return False
+        return m.startswith(("gpt-", "o1", "o3", "o4", "o5", "text-embedding-", "whisper-"))
+
+    @staticmethod
+    def _normalize_base_url(url: str) -> str:
+        normalized = (url or "").strip()
+        if not normalized:
+            return normalized
+        if "/v1" not in normalized:
+            normalized = normalized.rstrip("/") + "/v1"
+        return normalized.rstrip("/") + "/"
+
+    def _build_primary_client(self, model: str) -> Tuple[str, AsyncOpenAI, str]:
+        nvidia_key = os.getenv("NVIDIA_API_KEY")
+        openai_key = os.getenv("OPENAI_API_KEY")
+        nvidia_base = self._normalize_base_url(
+            os.getenv("NVIDIA_BASE_URL", "https://integrate.api.nvidia.com/v1/")
+        )
+        openai_base = os.getenv("OPENAI_BASE_URL", "").strip()
+
+        if self._looks_like_openai_model(model) and openai_key:
+            kwargs: Dict[str, Any] = {"api_key": openai_key}
+            if openai_base:
+                kwargs["base_url"] = openai_base
+            return "openai", AsyncOpenAI(**kwargs), openai_base or "https://api.openai.com/v1/"
+
+        if nvidia_key:
+            return "nvidia", AsyncOpenAI(api_key=nvidia_key, base_url=nvidia_base), nvidia_base
+
+        if openai_key:
+            kwargs = {"api_key": openai_key}
+            if openai_base:
+                kwargs["base_url"] = openai_base
+            return "openai", AsyncOpenAI(**kwargs), openai_base or "https://api.openai.com/v1/"
+
+        raise EnvironmentError(
+            "Thiếu API key để chạy MainAgent. Cần NVIDIA_API_KEY hoặc OPENAI_API_KEY."
+        )
+
+    def _build_fallback_client(self, model: str) -> Tuple[Optional[str], Optional[AsyncOpenAI], Optional[str]]:
+        nvidia_key = os.getenv("NVIDIA_API_KEY")
+        openai_key = os.getenv("OPENAI_API_KEY")
+        nvidia_base = self._normalize_base_url(
+            os.getenv("NVIDIA_BASE_URL", "https://integrate.api.nvidia.com/v1/")
+        )
+        openai_base = os.getenv("OPENAI_BASE_URL", "").strip()
+
+        if self.provider_name == "nvidia" and self._looks_like_openai_model(model) and openai_key:
+            kwargs: Dict[str, Any] = {"api_key": openai_key}
+            if openai_base:
+                kwargs["base_url"] = openai_base
+            return "openai", AsyncOpenAI(**kwargs), openai_base or "https://api.openai.com/v1/"
+
+        if self.provider_name == "openai" and model.strip().lower().startswith("openai/") and nvidia_key:
+            return "nvidia", AsyncOpenAI(api_key=nvidia_key, base_url=nvidia_base), nvidia_base
+
+        return None, None, None
 
     def _load_knowledge_base(self) -> List[Dict]:
         if not os.path.exists(self.dataset_path):
@@ -100,23 +162,49 @@ class MainAgent:
             f"[Tài liệu {i+1}]\n{ctx}" for i, ctx in enumerate(contexts)
         )
         user_message = f"Ngữ cảnh:\n{context_block}\n\nCâu hỏi: {question}"
+        messages = [
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": user_message},
+        ]
 
-        response = await self.client.chat.completions.create(
-            model=self.model,
-            messages=[
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": user_message},
-            ],
-            temperature=0.1,
-            max_tokens=512,
-        )
-        answer = response.choices[0].message.content.strip()
-        usage = {
-            "prompt_tokens": response.usage.prompt_tokens,
-            "completion_tokens": response.usage.completion_tokens,
-            "total_tokens": response.usage.total_tokens,
-        }
-        return answer, usage
+        async def _single_call(client: AsyncOpenAI, provider_name: str, base_url: str) -> Tuple[str, Dict]:
+            response = await client.chat.completions.create(
+                model=self.model,
+                messages=messages,
+                temperature=0.1,
+                max_tokens=512,
+            )
+            answer = (response.choices[0].message.content or "").strip()
+            usage_obj = getattr(response, "usage", None)
+            prompt_tokens = int(getattr(usage_obj, "prompt_tokens", 0) or 0)
+            completion_tokens = int(getattr(usage_obj, "completion_tokens", 0) or 0)
+            total_tokens = int(getattr(usage_obj, "total_tokens", prompt_tokens + completion_tokens) or 0)
+            return answer, {
+                "prompt_tokens": prompt_tokens,
+                "completion_tokens": completion_tokens,
+                "total_tokens": total_tokens,
+                "provider": provider_name,
+                "base_url": base_url,
+            }
+
+        try:
+            return await _single_call(self.client, self.provider_name, self.client_base_url)
+        except NotFoundError as primary_error:
+            if self.fallback_client is not None and self.fallback_provider_name:
+                answer, usage = await _single_call(
+                    self.fallback_client,
+                    self.fallback_provider_name,
+                    self.fallback_base_url or "",
+                )
+                usage["fallback_used"] = True
+                usage["primary_provider_failed"] = self.provider_name
+                usage["primary_error"] = str(primary_error)
+                return answer, usage
+            raise RuntimeError(
+                f"Model/endpoint không tồn tại (404). model={self.model}, "
+                f"provider={self.provider_name}, base_url={self.client_base_url}. "
+                "Kiểm tra lại AGENT_MODEL và API provider tương ứng."
+            ) from primary_error
 
     async def query(self, question: str) -> Dict:
         retrieved = self._retrieve(question)
@@ -135,6 +223,7 @@ class MainAgent:
                 "sources": [doc["source"] for doc, _ in retrieved],
                 "dataset_path": self.dataset_path,
                 "retrieval_method": "lexical_overlap",
+                "provider": self.provider_name,
                 "token_usage": usage,
             },
         }
