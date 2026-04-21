@@ -289,7 +289,7 @@ async def main():
     print(f"V2 Score: {v2_summary['metrics']['avg_score']}")
     print(f"Delta: {'+' if delta >= 0 else ''}{delta:.2f}")
 
-    print("\n💰 --- TOKEN & COST PIPELINE (V2) ---")
+    print("\n💰 --- TOKEN & COST PIPELINE ---")
     v2_tokens = v2_summary.get("token_usage", {})
     v2_cost = v2_summary.get("cost_estimation", {})
     print(
