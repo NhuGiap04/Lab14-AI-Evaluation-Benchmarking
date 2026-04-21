@@ -2,25 +2,46 @@ import asyncio
 import json
 import os
 import time
+from dotenv import load_dotenv
 from engine.runner import BenchmarkRunner
+from engine.retrieval_eval import RetrievalEvaluator
+from engine.llm_judge import LLMJudge
 from agent.main_agent import MainAgent
 
 # Giả lập các components Expert
 class ExpertEvaluator:
+    def __init__(self, top_k: int = 3):
+        self.retrieval = RetrievalEvaluator()
+        self.top_k = top_k
+
     async def score(self, case, resp): 
-        # Giả lập tính toán Hit Rate và MRR
+        retrieved_ids = []
+        metadata = resp.get("metadata", {}) if isinstance(resp, dict) else {}
+        if isinstance(metadata, dict):
+            sources = metadata.get("sources")
+            if isinstance(sources, list):
+                retrieved_ids = [str(x).strip() for x in sources if str(x).strip()]
+
+        expected_ids = case.get("expected_retrieval_ids")
+        if not isinstance(expected_ids, list) or not expected_ids:
+            case_meta = case.get("metadata", {}) if isinstance(case.get("metadata"), dict) else {}
+            expected_ids = case_meta.get("expected_retrieval_ids")
+        if not isinstance(expected_ids, list) or not expected_ids:
+            expected_ids = []
+
+        hit_rate = self.retrieval.calculate_hit_rate(expected_ids, retrieved_ids, top_k=self.top_k)
+        mrr = self.retrieval.calculate_mrr(expected_ids, retrieved_ids)
+
         return {
             "faithfulness": 0.9, 
             "relevancy": 0.8,
-            "retrieval": {"hit_rate": 1.0, "mrr": 0.5}
-        }
-
-class MultiModelJudge:
-    async def evaluate_multi_judge(self, q, a, gt): 
-        return {
-            "final_score": 4.5, 
-            "agreement_rate": 0.8,
-            "reasoning": "Cả 2 model đồng ý đây là câu trả lời tốt."
+            "retrieval": {
+                "hit_rate": hit_rate,
+                "mrr": mrr,
+                "top_k": self.top_k,
+                "expected_ids": expected_ids,
+                "retrieved_ids": retrieved_ids,
+            }
         }
 
 async def run_benchmark_with_results(agent_version: str):
@@ -37,7 +58,10 @@ async def run_benchmark_with_results(agent_version: str):
         print("❌ File data/golden_set.jsonl rỗng. Hãy tạo ít nhất 1 test case.")
         return None, None
 
-    runner = BenchmarkRunner(MainAgent(), ExpertEvaluator(), MultiModelJudge())
+    load_dotenv()
+    top_k = int(os.getenv("RETRIEVAL_TOP_K", "3"))
+    judge = LLMJudge()
+    runner = BenchmarkRunner(MainAgent(), ExpertEvaluator(top_k=top_k), judge)
     results = await runner.run_all(dataset)
 
     total = len(results)
@@ -46,6 +70,7 @@ async def run_benchmark_with_results(agent_version: str):
         "metrics": {
             "avg_score": sum(r["judge"]["final_score"] for r in results) / total,
             "hit_rate": sum(r["ragas"]["retrieval"]["hit_rate"] for r in results) / total,
+            "mrr": sum(r["ragas"]["retrieval"]["mrr"] for r in results) / total,
             "agreement_rate": sum(r["judge"]["agreement_rate"] for r in results) / total
         }
     }
