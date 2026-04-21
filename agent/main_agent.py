@@ -4,7 +4,7 @@ import os
 import re
 from typing import Any, Dict, List, Optional, Tuple
 
-from openai import AsyncOpenAI, NotFoundError
+from openai import AsyncOpenAI, BadRequestError, NotFoundError
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -26,12 +26,17 @@ class MainAgent:
     - Generation: gọi AGENT_MODEL để sinh câu trả lời từ context đã retrieve.
     """
 
-    def __init__(self, dataset_path: str = "data/golden_set.jsonl", top_k: int = 3):
+    def __init__(
+        self,
+        dataset_path: str = "data/golden_set.jsonl",
+        top_k: int = 3,
+        model: Optional[str] = None,
+    ):
         self.name = "SupportAgent-v1"
         self.version = "v1.0.0"
         self.top_k = top_k
         self.dataset_path = dataset_path
-        self.model = os.getenv("AGENT_MODEL", "openai/gpt-oss-20b")
+        self.model = model or os.getenv("AGENT_MODEL", "openai/gpt-oss-20b")
         self.provider_name, self.client, self.client_base_url = self._build_primary_client(self.model)
         self.fallback_provider_name, self.fallback_client, self.fallback_base_url = self._build_fallback_client(self.model)
         self.knowledge_base = self._load_knowledge_base()
@@ -168,12 +173,27 @@ class MainAgent:
         ]
 
         async def _single_call(client: AsyncOpenAI, provider_name: str, base_url: str) -> Tuple[str, Dict]:
-            response = await client.chat.completions.create(
-                model=self.model,
-                messages=messages,
-                temperature=0.1,
-                max_tokens=512,
-            )
+            request_kwargs: Dict[str, Any] = {
+                "model": self.model,
+                "messages": messages,
+                "temperature": 0.1,
+                # Ưu tiên tham số mới; fallback bên dưới cho model/API cũ.
+                "max_completion_tokens": 512,
+            }
+            try:
+                response = await client.chat.completions.create(**request_kwargs)
+            except BadRequestError as error:
+                error_text = str(error)
+                if "'max_completion_tokens' is not supported" in error_text:
+                    request_kwargs.pop("max_completion_tokens", None)
+                    request_kwargs["max_tokens"] = 512
+                    response = await client.chat.completions.create(**request_kwargs)
+                elif "'max_tokens' is not supported" in error_text:
+                    request_kwargs.pop("max_tokens", None)
+                    request_kwargs["max_completion_tokens"] = 512
+                    response = await client.chat.completions.create(**request_kwargs)
+                else:
+                    raise
             answer = (response.choices[0].message.content or "").strip()
             usage_obj = getattr(response, "usage", None)
             prompt_tokens = int(getattr(usage_obj, "prompt_tokens", 0) or 0)
